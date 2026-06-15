@@ -1,7 +1,9 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { PIN_LENGTH } from '@/lib/constants';
 import { submitKioskEvent } from '@/lib/api';
+import { enqueueOfflineEvent, getOfflineQueueCount } from '@/lib/offline-queue';
+import { buildQueuedEvent, isNetworkError } from '@/lib/offline-sync';
 import { resolveResultVariant } from '@/lib/labels';
 import { useKioskStatus } from '@/hooks/use-kiosk-status';
 import { ActivityScreen } from '@/screens/activity-screen';
@@ -17,7 +19,8 @@ interface KioskAppProps {
 }
 
 export function KioskApp({ token }: KioskAppProps) {
-  const { status, error, loading, refresh } = useKioskStatus(token);
+  const { status, error, loading, refresh, offlineQueueCount, setOfflineQueueCount } =
+    useKioskStatus(token);
   const [screen, setScreen] = useState<Screen>('home');
   const [pending, setPending] = useState<PendingEvent | null>(null);
   const [pin, setPin] = useState('');
@@ -26,7 +29,11 @@ export function KioskApp({ token }: KioskAppProps) {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<KioskEventResponse | null>(null);
 
-  const pinLength = PIN_LENGTH;
+  const pinLength = status?.pinLength ?? PIN_LENGTH;
+
+  useEffect(() => {
+    setOfflineQueueCount(getOfflineQueueCount());
+  }, [setOfflineQueueCount]);
 
   const resetFlow = useCallback(() => {
     setScreen('home');
@@ -77,6 +84,27 @@ export function KioskApp({ token }: KioskAppProps) {
 
       setScreen('result');
     } catch (err) {
+      if (isNetworkError(err) && pending) {
+        const queued = buildQueuedEvent({
+          eventType: pending.eventType,
+          pin,
+          reasonType: pending.reasonType,
+          note: pending.note,
+        });
+        enqueueOfflineEvent(queued);
+        setOfflineQueueCount(getOfflineQueueCount());
+
+        setResult({
+          success: true,
+          eventType: pending.eventType,
+          message: 'Nema mreže — događaj spremljen lokalno i bit će poslan kad se veza vrati.',
+          warning: 'offline',
+          timestamp: new Date().toISOString(),
+        });
+        setScreen('result');
+        return;
+      }
+
       setPinError(err instanceof Error ? err.message : 'Greška pri slanju');
       setShake(true);
       window.setTimeout(() => setShake(false), 500);
@@ -116,6 +144,12 @@ export function KioskApp({ token }: KioskAppProps) {
 
   return (
     <main className="kiosk-shell">
+      {offlineQueueCount > 0 ? (
+        <div className="offline-banner" role="status">
+          {offlineQueueCount} događaj(a) čeka slanje
+        </div>
+      ) : null}
+
       {screen === 'home' ? (
         <HomeScreen
           status={status}
